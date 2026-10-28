@@ -1,0 +1,133 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly ADVANTAGE_SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+usage() {
+    cat <<'EOF'
+Usage: bash advantage COMMAND [arguments]
+
+Commands:
+  doctor [--runtime-only] [--dataset PATH ...]
+  train-task TASK_NAME TASK_PROMPT [train_pytorch options]
+  train-base EXP_NAME [train_pytorch options]
+  train-mix EXP_NAME GROUP_A_CSV GROUP_B_CSV [train_pytorch options]
+  label [label_advantage_datasets options]
+  label-stage [label_stage options]
+  label-acbc [label_towel_mix_acbc options]
+  visualize [visualize_advantage_checkpoint options]
+  python [python arguments]
+EOF
+}
+
+if (( $# == 0 )); then
+    usage
+    exit 0
+fi
+
+if [[ "$1" == "-h" || "$1" == "--help" || "$1" == "help" ]]; then
+    usage
+    exit 0
+fi
+source "${ADVANTAGE_SCRIPT_DIR}/scripts/source_runtime.sh"
+advantage_init_runtime "${ADVANTAGE_SCRIPT_DIR}"
+cd "${ADVANTAGE_ROOT}"
+
+readonly COMMAND="$1"
+shift
+
+case "${COMMAND}" in
+    doctor)
+        exec "${ADVANTAGE_PYTHON}" scripts/doctor.py "$@"
+        ;;
+    train-task)
+        if (( $# < 2 )); then
+            echo "Error: train-task requires TASK_NAME and TASK_PROMPT" >&2
+            exit 2
+        fi
+        readonly TASK_NAME="$1"
+        readonly TASK_PROMPT="$2"
+        shift 2
+        if [[ ! "${TASK_NAME}" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]; then
+            echo "Error: TASK_NAME may only contain letters, numbers, '.', '_' and '-'" >&2
+            exit 2
+        fi
+        if [[ -z "${TASK_PROMPT}" ]]; then
+            echo "Error: TASK_PROMPT cannot be empty" >&2
+            exit 2
+        fi
+        readonly TASK_DATASET="${ADVANTAGE_DATA_ROOT}/${TASK_NAME}/base/origin"
+        if [[ ! -f "${TASK_DATASET}/meta/info.json" ]]; then
+            echo "Error: dataset not found: ${TASK_DATASET}" >&2
+            exit 2
+        fi
+        resume_args=()
+        if [[ "${RESUME:-0}" == "1" ]]; then
+            resume_args+=(--resume)
+        fi
+        exec "${ADVANTAGE_PYTHON}" -m torch.distributed.run \
+            --standalone \
+            --nproc_per_node="${NPROC_PER_NODE:-2}" \
+            scripts/train_pytorch.py \
+            ADVANTAGE_TORCH_UMI \
+            --exp-name="${TASK_NAME}" \
+            --data.repo-id="${TASK_DATASET}" \
+            --data.default-prompt="${TASK_PROMPT}" \
+            --pytorch-weight-path="${ADVANTAGE_PI05_BASE}" \
+            --checkpoint-base-dir="${ADVANTAGE_CHECKPOINT_ROOT}/advantage" \
+            "${resume_args[@]}" \
+            "$@"
+        ;;
+    train-base)
+        if (( $# < 1 )); then
+            echo "Error: train-base requires EXP_NAME" >&2
+            exit 2
+        fi
+        readonly EXP_NAME="$1"
+        shift
+        exec "${ADVANTAGE_PYTHON}" -m torch.distributed.run \
+            --standalone \
+            --nproc_per_node="${NPROC_PER_NODE:-2}" \
+            scripts/train_pytorch.py \
+            ADVANTAGE_TORCH_TOWEL_FOLD \
+            --exp-name="${EXP_NAME}" \
+            --data.repo-id="${ADVANTAGE_DATA_ROOT}/fold_towel/base/origin" \
+            --pytorch-weight-path="${ADVANTAGE_PI05_BASE}" \
+            --checkpoint-base-dir="${ADVANTAGE_CHECKPOINT_ROOT}/advantage" \
+            "$@"
+        ;;
+    train-mix)
+        if (( $# < 3 )); then
+            echo "Error: train-mix requires EXP_NAME GROUP_A_CSV GROUP_B_CSV" >&2
+            exit 2
+        fi
+        exec bash scripts/train_advantage_mix.sh \
+            "$1" "$2" "$3" \
+            --pytorch-weight-path="${ADVANTAGE_PI05_BASE}" \
+            --checkpoint-base-dir="${ADVANTAGE_CHECKPOINT_ROOT}/advantage" \
+            "${@:4}"
+        ;;
+    label)
+        exec bash scripts/label_advantage_datasets.sh "$@"
+        ;;
+    label-stage)
+        exec "${ADVANTAGE_PYTHON}" scripts/label_stage.py "$@"
+        ;;
+    label-acbc)
+        exec "${ADVANTAGE_PYTHON}" scripts/label_towel_mix_acbc.py "$@"
+        ;;
+    visualize)
+        exec "${ADVANTAGE_PYTHON}" scripts/visualize_advantage_checkpoint.py "$@"
+        ;;
+    python)
+        exec "${ADVANTAGE_PYTHON}" "$@"
+        ;;
+    -h|--help|help)
+        usage
+        ;;
+    *)
+        echo "Error: unknown command: ${COMMAND}" >&2
+        usage >&2
+        exit 2
+        ;;
+esac

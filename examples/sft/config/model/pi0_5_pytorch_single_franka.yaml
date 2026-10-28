@@ -1,0 +1,41 @@
+model_type: "openpi_pytorch"
+
+# Model-shape template for single-Franka tcp_rot6d. Filesystem paths
+# (model_path, openpi.assets_dir, and openpi.asset_id) live in the experiment
+# config, not here, so this template stays path-free and reusable.
+
+# Weight dtype for SFT: fp32. FSDP mixed precision can still cast params for
+# compute through the experiment config.
+precision: fp32
+
+# LoRA is not used, but the shared model factory reads these keys.
+is_lora: False
+lora_rank: 32
+
+# Single-Franka tcp_rot6d: 10-dim env actions
+# ([xyz, rot6d, gripper]), 20-step chunk. `model_action_dim` below pads this
+# to the Pi0 action width.
+num_action_chunks: 20
+action_dim: 10
+use_proprio: True
+
+# Flow-matching denoising steps used by eval/RL samplers; carried here so the
+# shared factory reads one uniform field.
+num_steps: 5
+
+# No value head in the SFT model.
+add_value_head: False
+
+openpi:
+  task: sft
+  config_name: "pi05_singlefranka_tcp_rot6d"
+  # Model still receives the standard three image slots. The single-Franka data
+  # transform fills base + left wrist and masks out right wrist.
+  num_images_in_input: 3
+  action_chunk: 20
+  action_env_dim: 10
+  model_action_dim: 32
+  paligemma_variant: "gemma_2b"
+  action_expert_variant: "gemma_300m"
+  max_token_len: 200
+  discrete_state_input: false

@@ -1,0 +1,70 @@
+# Independent ADVANTAGE stage-advantage OOD configuration.
+# This file is used only by ``ood/advantage_monitor.py`` and does not inherit
+# or merge any settings from ``config/ood.yaml``.
+
+runtime:
+  # Relative paths are resolved from HIL_UMI_ROOT (the monorepo root).
+  advantage_root: "advantage"
+
+model:
+  # Exact ADVANTAGE TrainConfig used to train the stage-advantage checkpoint.
+  config_name: "ADVANTAGE_TORCH_TOWEL_FOLD"
+  # May point directly to a directory containing model.safetensors, or to an
+  # experiment directory whose highest numeric child contains the weights.
+  ckpt_dir: "checkpoints/advantage/ft-base"
+  device: "cuda:0"
+  prompt: "stack the cubes"
+  warmup_runs: 1
+
+detection:
+  # Strict rule: advantage < threshold is OOD; equality is not OOD.
+  # Example only: calibrate for your task and checkpoint before collection.
+  threshold: 0.3
+  # Compare the current paired camera tick with the 50th previous unique tick.
+  frame_offset: 50
+  # Latest-only inference at 2 Hz by default.
+  interval_s: 0.5
+  # Send the four inference anchor images to the live dashboard at inference rate.
+  send_anchor_images: true
+
+source: 
+  socket_path: "/tmp/collection_ood_state.sock"
+  camera_connect_timeout_s: 60.0
+  camera_stale_reconnect_s: 1.0
+  camera_frequency_hz: 30.0
+  cameras:
+    front:
+      name: "cam_front"
+      ring_name: "dr_cam_front_rgb"
+      width: 640
+      height: 480
+      ring_slots: 60
+    wrist_left:
+      name: "cam_left"
+      ring_name: "dr_cam_left_rgb"
+      width: 640
+      height: 480
+      ring_slots: 60
+  model_inputs:
+    front: "front"
+    wrist: "wrist_left"
+  preview_image: "front"
+
+replay:
+  enabled: true
+  # Keep recent idle exploration in memory and prepend it to OOD replay on A.
+  # This does not prepend data to the main LeRobot episode.
+  pretrigger_s: 3.0
+  # The combined launcher overrides this from the recorder YAML's output_dir.
+  output_root: "./data_recorder_output"
+  fps: 30.0
+  front_camera: "front"
+  wrist_camera: "wrist_left"
+  ffmpeg_bin: "ffmpeg"
+  encoder_preference: "nvenc_then_x264"
+  encoder_queue_size: 30
+
+server:
+  host: "127.0.0.1"
+  port: 8765
+  static_dir: null

@@ -1,0 +1,86 @@
+# Template for externally installed data_recorder 0.1.21.
+# Copy to recorder.local.yaml; set every enabled camera serial and rig ID.
+# Run the launcher from this directory so relative output_dir stays consistent.
+dataset_format: "v2.1"
+repo_id: "local/teleop_dataset"
+robot_type: "custom_teleop"
+output_dir: "./data_recorder_output"
+fps: 30
+task_description: "stack the cubes"
+image_storage_mode: "video"
+collection_metadata:
+  collection_device_id: ""
+cameras:
+  - name: cam_left
+    serial: ""
+    enable: true
+    rgb: true
+    depth: false
+    width: 640
+    height: 480
+    fps: 30
+    ring_slots: 60
+  - name: cam_right
+    serial: ""
+    enable: true
+    rgb: true
+    depth: false
+    width: 640
+    height: 480
+    fps: 30
+    ring_slots: 60
+  - name: cam_front
+    serial: ""
+    enable: true
+    rgb: true
+    depth: false
+    width: 640
+    height: 480
+    fps: 30
+    ring_slots: 60
+oculus:
+  ip_address: null
+  auto_launch: true
+gripper:
+  enabled: true
+  vel_pct: 1.0
+  force_pct: 1.0
+  acc_pct: 1.0
+  dec_pct: 1.0
+  right:
+    tx_id: 513
+    rx_id: 769
+    channel_index: 0
+    enabled: true
+    is_extended_id: true
+  left:
+    tx_id: 1
+    rx_id: 1
+    channel_index: 1
+    enabled: true
+    is_extended_id: true
+oculus_validity:
+  start_require_all_valid: true
+  force_stop_on_disconnected: true
+  force_stop_on_not_full_valid: true
+  stale_timeout_s: 0.5
+device_health:
+  start_require_all_online: true
+  force_stop_on_camera_offline: true
+  force_stop_on_gripper_offline: true
+  camera_process_start_method: spawn
+state_queue_size: 200
+image_queue_size: 300
+buffer_size: 300
+writer_sync_mode: "b"
+streaming_encoding: true
+vcodec: "libx264"
+legacy_export:
+  mode: reencode
+  vcodec: libx264
+  preset: veryfast
+  auto_front_zip_enabled: false
+logging:
+  enabled: true
+  log_dir: null
+  level: INFO

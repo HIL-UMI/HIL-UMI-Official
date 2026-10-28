@@ -1,0 +1,197 @@
+env_type: realworld
+
+total_num_envs: 1
+auto_reset: True
+ignore_terminations: False
+reward_mode: raw
+wrap_obs_mode: simple
+seed: 0
+group_size: 1
+use_fixed_reset_state_ids: False
+max_steps_per_rollout_epoch: 300
+max_episode_steps: null
+# Synchronous evaluation only: after the final action in each executed chunk,
+# wait this many extra seconds before reading the next inference observation.
+sync_action_chunk_final_wait_s: 0.0
+
+# Autonomous policy rollout. Keyboard eval_control gates episode start/end.
+keyboard_reward_wrapper: eval_control
+use_spacemouse: False
+use_gello: False
+use_pico: False
+use_vive: False
+use_relative_frame: False
+no_gripper: False
+
+# The first configured camera is wrist_1; the second is wrist_2.
+main_image_key: wrist_1
+extra_image_key: wrist_2
+
+# RealWorldEnv must preserve the model's 10D state order.
+state_keys:
+  - tcp_pose_rot6d
+  - gripper_position
+
+video_cfg:
+  save_video: True
+  info_on_video: True
+  video_base_dir: ${runner.logger.log_path}/video/eval
+  # Keep the legacy N.mp4 for wrist_1 and save wrist_2 beside it as
+  # N_wrist_2.mp4 for every completed evaluation episode.
+  additional_image_fields:
+    wrist_2: extra_view_images
+
+init_params:
+  id: "SingleFrankaTCPEnv-v1"
+  num_envs: null
+
+override_cfg:
+  is_dummy: false
+  manual_episode_control_only: true
+  # task_description: "fold the towel on the table and put it into the basket"
+  # task_description: "put the purple cube onto the top of the red cube, Advantage: positive"
+  # task_description: "pick up the purple cube and put it onto the top of the red cube, Advantage: positive"
+  # task_description: "pick up the pens and put them into the yellow drawer, then pick up the remaining objects and put them into the green drawer, Advantage: positive"
+  task_description: "pick up the pens and put them into the yellow drawer, then pick up the remaining objects and put them into the green drawer"
+  # task_description: "first, open the yellow drawer, then pick up the pens and put them into the corresponding compartments. After that, open the green drawer, and pick up other objects and put them into it"
+  # task_description: "Open the yellow drawer. Pick up the pens and place each pen into the compartment marked with stickers of the matching color. Then open the green drawer. Pick up the remaining objects and place them inside the green drawer."
+  # task_description: "pick up the stamp and put it into the rectangular area on the paper"
+  # task_description: "fold the towel on the table and put it into the basket, Advantage: positive"
+  # task_description: "pick up the stamp and put it into the rectangular area on the paper, Advantage: positive"
+  # task_description: "hang the cups on the mug tree"
+  # task_description: "hang the cups on the mug tree"
+  rotation_repr: rot6d
+
+  # Order matters: wrist/hand camera first, base/front camera second.
+  camera_serials:
+    - ${oc.env:FRANKA_WRIST_CAMERA_SERIAL}
+    - ${oc.env:FRANKA_FRONT_CAMERA_SERIAL}
+  camera_type: realsense
+  image_width: 640
+  image_height: 480
+  camera_fps: 30
+  enable_camera_player: true
+
+  # Optional browser UI for reproducing a recorded scene before each epoch.
+  # Enable it with --scene_reference_dir in run_umi_left_franka_eval.sh.
+  scene_alignment_enabled: false
+  scene_alignment_reference_dir: null
+  scene_alignment_reference_set_dir: null
+  scene_alignment_cache_dir: null
+  scene_alignment_epoch_offset: 0
+  scene_alignment_view_name: wrist_2
+  scene_alignment_video_suffix: wrist_2
+  scene_alignment_host: 127.0.0.1
+  scene_alignment_port: 8765
+  scene_alignment_reference_opacity: 0.35
+
+  step_frequency: 30.0
+  max_num_steps: 300
+  enable_random_reset: false
+  # Previous reset pose captured read-only from Franka O_T_EE on 2026-08-03.
+  # reset_ee_pose: [0.305087147, -0.048564184, 0.314533839, -2.937700689, -0.153071202, -1.070547034]
+  # new: [0.441255554, -0.029124903, 0.234936845, -3.060613208, -0.085237326, -0.842707319]
+  # Current reset pose captured read-only from Franka O_T_EE on 2026-08-11.
+  reset_ee_pose: [0.305087147, -0.048564184, 0.314533839, -2.937700689, -0.153071202, -1.070547034]
+  target_ee_pose: [0.4279, 0.0294, 0.2025, 3.081993439, -0.040329373, -0.962567655]
+  reward_threshold: [0.01, 0.01, 0.01, 0.2, 0.2, 0.2]
+  enable_gripper_penalty: false
+  action_scale: [1.0, 1.0, 1.0]
+
+  # One physical right OmniPicker: command 0x201, feedback 0x301, channel 0.
+  end_effector_config:
+    tx_id: 513
+    rx_id: 769
+    channel_index: 0
+    is_extended_id: true
+    accept_all_rx_ids: true
+    rx_stale_timeout_s: 0.5
+    online_probe_interval_s: 0.2
+    rx_fail_probe_threshold: 3
+    disconnect_offline_threshold: 5
+    vel_pct: 1.0
+    force_pct: 1.0
+    acc_pct: 1.0
+    dec_pct: 1.0
+    max_width: 0.08
+
+  # Translation limits expanded by 5 cm in X/Y and upward Z. The previously
+  # verified physical minimum Z is intentionally unchanged. Rotation limits
+  # remain unchanged until their extra range is verified on hardware.
+  # ee_pose_limit_min: [0.1779, -0.4000, 0.072389345, 2.681993439, -0.440329373, -2.453458458]
+  # Previous limits (yaw: -2.453458458 to 0.741184979 rad):
+  ee_pose_limit_min: [0.1779, -0.4000, 0.087389345, 2.681993439, -0.440329373, -2.453458458]
+  ee_pose_limit_max: [0.8079, 0.4000, 0.5025, 3.481993439, 0.359670627, 0.741184979]
+  # Limit yaw to reset_ee_pose yaw (-1.070547034 rad) +/- 30 degrees.
+  # ee_pose_limit_min: [0.1779, -0.4000, 0.090389345, 2.681993439, -0.440329373, -1.595945197]
+  # ee_pose_limit_max: [0.8079, 0.4000, 0.5025, 3.481993439, 0.359670627, -0.555148871]
+  # ee_pose_limit_min: [0.1779, -0.4000, 0.080389345, 2.681993439, -0.440329373, -1.595945197]
+  # ee_pose_limit_max: [0.8079, 0.4000, 0.5025, 3.481993439, 0.359670627, -0.555148871]
+
+
+  # Conservative first-run limits at 30 Hz.
+  max_translation_per_step_m: 0.005
+  max_rotation_per_step_rad: 0.05
+  unsafe_action_behavior: hold
+  open_gripper_on_reset: true
+
+  # Async-only, opt-in numeric trace. When false, no recorder is created and
+  # the original inference/control path performs no trace work or file I/O.
+  save_pose_trace: false
+  pose_trace_dir: ${runner.logger.log_path}/pose_traces/eval
+
+  # ^E T_P: calibrated pose of the physical robot OmniPicker TCP P in the
+  # Franka SDK endpoint E. The live robot reports ^F T_E = I for this setup.
+  # Keep this physical transform separate so the P-axis hardware test remains
+  # tied to the real gripper TCP.
+  franka_tcp_to_policy_tool:
+    - [0.011082338, -0.707880616, 0.706245152, 0.003064377]
+    - [0.014651449, -0.706097751, -0.707962783, 0.003577890]
+    - [0.999831244, 0.018193397, 0.002546264, 0.178781140]
+    - [0.0, 0.0, 0.0, 1.0]
+
+  # ^C T_U from DeskTidy's left-controller URDF: pose of the acquisition UMI
+  # TCP U in the saved Oculus controller/action frame C. The training dataset
+  # stores T_H_C, so inference composes
+  # ^E T_C = ^E T_P @ inverse(^C T_U) before applying the predicted D_C.
+  oculus_controller_to_umi_tool:
+    - [0.272591650, -0.946236850, -0.174153830, 0.060007256]
+    - [-0.809545160, -0.323389230, 0.489955160, -0.199112670]
+    - [-0.519933100, 0.007427719, -0.854174730, -0.121099280]
+    - [0.0, 0.0, 0.0, 1.0]
+
+  gripper_width_min_m: 0.0
+  gripper_width_max_m: 0.08
+  policy_gripper_closed_value: 0.2
+  policy_gripper_open_value: 1.0
+  policy_gripper_action_threshold: 0.5
+
+  gripper_hysteresis_enabled: true
+  policy_gripper_close_threshold: 0.4
+  policy_gripper_open_threshold: 0.6
+  gripper_debounce_steps: 3
+
+
+  compliance_param:
+    target_filter_alpha: 0.2
+    translational_stiffness: 6000
+    translational_damping: 140
+    rotational_stiffness: 150
+    rotational_damping: 7
+    # 对于 stack_cubes 任务，调整该参数无明显性能变化
+    nullspace_stiffness: 0.2
+    joint1_nullspace_stiffness: 1
+    translational_Ki: 0
+    translational_clip_x: 0.003
+    translational_clip_y: 0.003
+    translational_clip_z: 0.005
+    translational_clip_neg_x: 0.003
+    translational_clip_neg_y: 0.003
+    translational_clip_neg_z: 0.005
+    rotational_clip_x: 0.02
+    rotational_clip_y: 0.02
+    rotational_clip_z: 0.02
+    rotational_clip_neg_x: 0.02
+    rotational_clip_neg_y: 0.02
+    rotational_clip_neg_z: 0.02
+    rotational_Ki: 0

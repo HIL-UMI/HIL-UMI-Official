@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Robot-Free Human-in-the-loop Online Data Collection.</title>
+  <link rel="stylesheet" href="/static/styles.css?v=20260905.2">
+</head>
+<body>
+  <div class="ambient ambient-a"></div>
+  <div class="ambient ambient-b"></div>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="collection OOD home">
+      <span class="brand-mark"><i></i><i></i><i></i></span>
+      <span><strong>collection</strong><small>OOD OBSERVATORY</small></span>
+    </a>
+    <nav class="mode-switch" aria-label="Dashboard mode">
+      <button class="mode-button active" data-mode="live">Live</button>
+      <button class="mode-button" data-mode="replay">Replay</button>
+    </nav>
+    <div class="connection"><span id="connection-dot"></span><span id="connection">Connecting</span></div>
+  </header>
+
+  <main class="shell">
+    <section id="live-view" class="mode-view active">
+      <div class="section-heading">
+        <div><span class="eyebrow">REAL-TIME MONITOR</span><h1 id="live-title">Robot-Free Human-in-the-loop Online Data Collection.</h1></div>
+        <div class="heading-note"><span class="pulse-dot"></span>30 Hz paired RGB · target 2 Hz inference</div>
+      </div>
+
+      <div class="live-grid">
+        <div class="live-visual-column">
+          <article class="panel camera-panel">
+            <div class="panel-head"><span>Front + wrist cameras</span><span id="live-camera-mode" class="tag muted">STARTING</span></div>
+            <div class="camera-frame">
+              <img id="live-preview" alt="Live front camera preview">
+              <div class="camera-inset">
+                <img id="live-wrist-preview" alt="Live left wrist camera preview">
+                <span>WRIST LEFT</span>
+              </div>
+              <div class="scanline"></div>
+              <div id="live-frame-label" class="frame-label">Waiting for recorder stream</div>
+            </div>
+            <div id="advantage-inputs" class="advantage-inputs hidden">
+              <div class="advantage-pair-label"><span>MODEL INPUT · CURRENT</span><b id="adv-current-label">Waiting for anchor</b></div>
+              <div class="advantage-pair-label"><span>MODEL INPUT · REFERENCE</span><b id="adv-reference-label">CURRENT − 50</b></div>
+              <figure><img id="adv-current-front" alt="Advantage current front input"><figcaption>CURRENT · FRONT</figcaption></figure>
+              <figure><img id="adv-reference-front" alt="Advantage reference front input"><figcaption>REFERENCE · FRONT</figcaption></figure>
+              <figure><img id="adv-current-wrist" alt="Advantage current wrist input"><figcaption>CURRENT · WRIST</figcaption></figure>
+              <figure><img id="adv-reference-wrist" alt="Advantage reference wrist input"><figcaption>REFERENCE · WRIST</figcaption></figure>
+            </div>
+          </article>
+
+          <article class="panel timeline-panel">
+            <div class="panel-head">
+              <span id="live-history-title">Historical ES Score curve</span>
+              <div id="live-history-legend" class="legend"><i class="cyan"></i>Immediate <i class="red"></i>Aligned Energy <b>●</b> inference anchor</div>
+            </div>
+            <canvas id="live-history" class="timeline-canvas"></canvas>
+          </article>
+        </div>
+
+        <article class="panel score-panel">
+          <div class="panel-head"><span>OOD state</span><span id="live-anchor" class="tag muted">NO ANCHOR</span></div>
+          <div id="live-status" class="ood-state paused"><span class="state-orb"></span><div><small>INFERENCE</small><strong>STARTING</strong></div></div>
+          <p id="live-status-detail" class="status-detail">Waiting for recorder state and camera frames</p>
+          <div class="score-grid">
+            <div><small id="live-primary-label">ENERGY</small><strong id="live-energy">—</strong></div>
+            <div><small id="live-secondary-label">IMMEDIATE</small><strong id="live-immediate">—</strong></div>
+            <div><small id="live-frame-score-label">FRAME</small><strong id="live-frame">—</strong></div>
+            <div><small>STEP</small><strong id="live-step">—</strong></div>
+            <div><small>MODEL MS</small><strong id="live-model-latency">—</strong></div>
+            <div><small>PREDICT MS</small><strong id="live-prediction-latency">—</strong></div>
+            <div><small id="live-aligned-label">ALIGNED MS</small><strong id="live-aligned-latency">—</strong></div>
+            <div><small id="live-prefix-label">PREFIX MS</small><strong id="live-prefix-latency">—</strong></div>
+          </div>
+          <div id="live-component-section">
+            <div class="component-title"><span>Energy composition</span><small>independent diagnostic scores</small></div>
+            <div id="live-components" class="components"></div>
+            <p class="microcopy">Final Energy is attached to the RGB frame that initiated its Pi0.5 prediction. Component shares are descriptive and do not change the OOD decision.</p>
+          </div>
+        </article>
+
+      </div>
+    </section>
+
+    <section id="replay-view" class="mode-view">
+      <div class="section-heading">
+        <div><span class="eyebrow">SAVED EPISODES</span><h1>Frame-aligned replay</h1></div>
+        <div id="replay-summary" class="heading-note">Select a saved episode</div>
+      </div>
+
+      <div class="replay-layout">
+        <aside class="panel episode-browser">
+          <div class="panel-head"><span>Episodes</span><button id="refresh-episodes" class="icon-button" title="Refresh episodes">↻</button></div>
+          <div id="episode-list" class="episode-list"><div class="empty-state">No replay archives yet.</div></div>
+        </aside>
+
+        <div class="replay-workspace">
+          <article class="panel player-panel">
+            <div class="panel-head">
+              <span id="replay-title">Episode replay</span>
+              <button id="swap-camera" class="ghost-button">Swap camera</button>
+            </div>
+            <div class="video-stage">
+              <video id="replay-main" playsinline muted preload="metadata"></video>
+              <div class="video-label" id="main-camera-label">FRONT</div>
+              <div class="camera-inset">
+                <video id="replay-secondary" playsinline muted preload="metadata"></video>
+                <span id="secondary-camera-label">WRIST LEFT</span>
+              </div>
+              <div id="video-empty" class="video-empty">Choose an episode to begin replay</div>
+            </div>
+            <div class="transport">
+              <button id="play-toggle" class="play-button" aria-label="Play or pause">▶</button>
+              <span id="replay-clock" class="clock">00:00.000 / 00:00.000</span>
+              <input id="replay-scrubber" type="range" min="0" max="1" step="0.001" value="0" aria-label="Replay position">
+              <span id="alignment-badge" class="alignment-badge">NO SCORE</span>
+            </div>
+          </article>
+
+          <div class="replay-data-grid">
+            <article id="advantage-replay-reference" class="panel advantage-replay-reference hidden">
+              <div class="panel-head"><span>Reference input pair</span><span id="replay-reference-label" class="tag muted">NO ANCHOR</span></div>
+              <div class="reference-video-grid">
+                <figure><video id="replay-reference-front" playsinline muted preload="metadata"></video><figcaption>REFERENCE · FRONT</figcaption></figure>
+                <figure><video id="replay-reference-wrist" playsinline muted preload="metadata"></video><figcaption>REFERENCE · WRIST</figcaption></figure>
+              </div>
+            </article>
+            <article class="panel replay-energy-panel">
+              <div class="panel-head"><span id="replay-chart-title">Aligned Energy</span><span class="legend"><b>●</b> actual inference anchors · step-held between anchors</span></div>
+              <canvas id="replay-energy-chart" class="timeline-canvas"></canvas>
+            </article>
+            <article class="panel replay-inspector">
+              <div class="panel-head"><span>Frame inspector</span><span id="replay-ood-tag" class="tag muted">—</span></div>
+              <div class="inspector-score"><small id="replay-score-label">HELD ENERGY</small><strong id="replay-energy">—</strong><span id="replay-anchor-frame">No anchor</span></div>
+              <div id="replay-components" class="components"></div>
+            </article>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="action-panel" class="panel action-panel">
+      <div class="action-heading">
+        <div><span class="eyebrow">ALIGNED 15 × 10 WINDOW</span><h2 id="action-heading">Action trajectory distribution</h2></div>
+        <div class="trajectory-legend"><i class="model"></i>Model samples / mean <i class="human"></i>Human trajectory</div>
+      </div>
+      <div class="action-toolbar" role="tablist" aria-label="Action dimensions">
+        <button class="action-tab active" data-group="position">Position</button>
+        <button class="action-tab" data-group="rotation">Rotation 6D</button>
+        <button class="action-tab" data-group="gripper">Gripper</button>
+        <button class="action-tab expand" data-group="all">Expand all 10 dimensions</button>
+      </div>
+      <div id="action-context" class="action-context">Waiting for a finalized aligned window.</div>
+      <div id="action-grid" class="action-grid"></div>
+    </section>
+  </main>
+
+  <footer id="identity-footer"><span>Frame identity</span> Model input RGB → prediction ID → aligned human window → Energy → replay frame</footer>
+  <script src="/static/app.js?v=20260905.2"></script>
+</body>
+</html>

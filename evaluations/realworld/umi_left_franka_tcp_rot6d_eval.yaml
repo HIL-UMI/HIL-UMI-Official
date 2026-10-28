@@ -1,0 +1,67 @@
+defaults:
+  - env/realworld_single_franka_tcp_rot6d@env.eval
+  - model/pi0_5_pytorch_single_franka@rollout.model
+  - override hydra/job_logging: stdout
+  - _self_
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+
+cluster:
+  num_nodes: 1
+  component_placement:
+    env:
+      node_group: franka
+      placement: 0
+    rollout:
+      node_group: inference
+      placement: 0
+  node_groups:
+    - label: inference
+      node_ranks: 0
+      env_configs:
+        - node_ranks: 0
+          python_interpreter_path: ${oc.env:POLICY_PYTHON,${oc.env:HIL_UMI_ROOT,.}/.venv-policy/bin/python}
+    - label: franka
+      node_ranks: 0
+      env_configs:
+        - node_ranks: 0
+          python_interpreter_path: ${oc.env:FRANKA_PYTHON,${oc.env:HIL_UMI_ROOT,.}/.venv-franka/bin/python}
+          env_vars:
+            - ROS_MASTER_URI: ${oc.env:ROS_MASTER_URI,http://127.0.0.1:11311}
+            - ROS_HOSTNAME: ${oc.env:ROS_HOSTNAME,127.0.0.1}
+      hardware:
+        type: Franka
+        configs:
+          - robot_ip: ${oc.env:FRANKA_ROBOT_IP}
+            node_rank: 0
+            gripper_type: omnipicker
+
+runner:
+  task_type: embodied_eval
+  logger:
+    log_path: "../results"
+    project_name: training
+    experiment_name: "umi_left_franka_tcp_rot6d_eval"
+    logger_backends: ["tensorboard"]
+  only_eval: True
+  val_check_interval: -1
+  ckpt_path: null
+
+env:
+  group_name: "EnvGroup"
+  enable_offload: False
+  eval:
+    rollout_epoch: 10
+    total_num_envs: 1
+
+rollout:
+  group_name: "RolloutGroup"
+  backend: "huggingface"
+  recompute_logprobs: False
+  enable_offload: False
+  pipeline_stage_num: 1
+  collect_transitions: False
+  collect_prev_infos: False

@@ -1,0 +1,23 @@
+name: Bug report
+description: Report a reproducible HIL-UMI software problem.
+title: "[Bug] "
+body:
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Expected and observed behavior
+      description: Use synthetic or redacted examples. Follow SECURITY.md for private information.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction
+      description: Revision, component, environment versions and minimal command.
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Relevant output
+      description: Remove credentials, personal paths and device identifiers.

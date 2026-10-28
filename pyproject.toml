@@ -1,0 +1,84 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hil-umi-training"
+version = "0.1.0"
+description = "HIL-UMI policy training and single-Franka runtime, derived from RLinf"
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+license = {file = "LICENSE"}
+authors = [{name = "HIL-UMI contributors"}]
+dependencies = [
+    "ray[default]==2.47.1", "torch>=2.6,<2.8", "hydra-core==1.3.2",
+    "omegaconf==2.3.0", "numpy>=1.26,<2", "datasets==3.6.0",
+    "torchdata>=0.11,<0.12", "scipy==1.14.1", "accelerate", "einops", "nvitop",
+    "pybind11", "huggingface-hub>=0.27,<1", "safetensors", "psutil", "imageio[ffmpeg]",
+    "filelock", "tqdm", "packaging", "pyyaml", "rich", "sortedcontainers",
+    "tensorboard", "wandb<0.25.1", "swanlab>=0.6.11", "icmplib",
+]
+
+[project.urls]
+Repository = "https://github.com/Zngyim/HIL-UMI"
+"Bug Tracker" = "https://github.com/Zngyim/HIL-UMI/issues"
+
+[project.optional-dependencies]
+openpi = ["openpi", "openpi-client", "lerobot", "transformers==4.53.2", "torchvision==0.21.0", "torchcodec==0.2", "peft", "imageio[ffmpeg]", "av==15.1.0", "pandas<3", "pyarrow<20"]
+franka = ["gymnasium==0.29.1", "opencv-python<4.12", "rospkg", "empy==3.3.4", "pyquaternion", "pymodbus>=3,<4", "pyserial", "defusedxml", "imageio[ffmpeg]", "evdev; sys_platform == 'linux'", "pyrealsense2; sys_platform == 'linux' and platform_machine == 'x86_64'"]
+test = ["transformers==4.53.2", "pytest>=8,<10", "build", "wheel", "ruff==0.14.3", "pyarrow<20", "pandas<3", "gymnasium==0.29.1", "opencv-python<4.12", "pillow", "aiohttp>=3.10,<4"]
+
+[tool.uv]
+prerelease = "allow"
+override-dependencies = ["torch==2.6.0", "torchvision==0.21.0", "torchaudio==2.6.0", "torchcodec==0.2", "jax[cuda12]==0.5.3", "orbax-checkpoint==0.11.13", "ml-dtypes==0.4.1", "tensorstore==0.1.74", "numpy<2", "pyarrow<20", "pandas<3", "setuptools>=69,<75.9"]
+
+[tool.uv.sources]
+openpi = {git = "https://github.com/RLinf/openpi", rev = "c5dc4b9296a1a4739bf52828f28a579f12dce763"}
+openpi-client = {git = "https://github.com/RLinf/openpi", rev = "c5dc4b9296a1a4739bf52828f28a579f12dce763", subdirectory = "packages/openpi-client"}
+lerobot = {git = "https://github.com/huggingface/lerobot", rev = "0cf864870cf29f4738d3ade893e6fd13fbd7cdb5"}
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["training*"]
+exclude = ["tests*", "docs*", "examples*", "toolkits*", "advantage*", "collection*"]
+
+[tool.setuptools.package-data]
+training = ["**/*.yaml", "**/*.yml"]
+
+[tool.ruff]
+line-length = 88
+indent-width = 4
+target-version = "py311"
+
+[tool.ruff.lint]
+isort = {known-first-party = ["training"]}
+select = ["C", "E", "F", "I", "W", "CPY001", "RUF013", "UP006", "PERF102", "PLC1802", "PLC0208", "D", "RUF002", "DOC102", "DOC202", "DOC403", "DOC502"]
+ignore = [
+    "C901", # "complex-structure"
+    "E501", # "line-too-long"
+    "E741", # "ambiguous-variable-name"
+    "D100", # "Missing docstring in public module"
+    "D104", # "Missing docstring in public package"
+    "D203", # "incorrect-blank-line-before-class", conflict with D211,
+    "D213", # "multi-line-summary-second-line", conflict with D212
+]
+fixable = ["ALL"]
+unfixable = []
+
+[tool.ruff.lint.per-file-ignores]
+# Only enable docstring check for the scheduler module for now.
+"!training/scheduler/**.py" = ["D", "RUF002"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+docstring-code-format = true
+docstring-code-line-length = "dynamic"

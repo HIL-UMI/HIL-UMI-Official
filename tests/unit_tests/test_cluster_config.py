@@ -1,0 +1,1180 @@
+# Copyright 2025 The RLinf Authors.
+# Modified for HIL-UMI.
+# SPDX-License-Identifier: Apache-2.0
+
+import os
+import shlex
+import sys
+from pathlib import Path
+
+import pytest
+import ray
+from omegaconf import DictConfig, OmegaConf
+
+from training.scheduler import (
+    AcceleratorType,
+    Cluster,
+    ComponentPlacement,
+    NodePlacementStrategy,
+    Worker,
+)
+from training.scheduler.cluster.cluster import ClusterEnvVar, PathEnvMergeMode
+from training.scheduler.cluster.config import ClusterConfig
+from training.scheduler.hardware.accelerators.amd_gpu import RocprofSysConfig
+from training.scheduler.hardware.accelerators.nvidia_gpu import NsightConfig
+from training.scheduler.hardware.robots.franka import FrankaConfig
+
+
+@pytest.fixture(autouse=True)
+def _expose_test_module_to_ray_workers(request, monkeypatch):
+    """Make this test's real worker class importable in spawned processes."""
+    if request.node.get_closest_marker("ray_integration") is None:
+        return
+    tests_root = str(Path(__file__).resolve().parent)
+    existing = os.environ.get("PYTHONPATH")
+    monkeypatch.setenv(
+        "PYTHONPATH", os.pathsep.join([tests_root, *([existing] if existing else [])])
+    )
+
+
+def accelerator_device_count() -> int:
+    """Return accelerator count through the Worker backend abstraction."""
+    if Worker.torch_platform is None or not hasattr(
+        Worker.torch_platform, "device_count"
+    ):
+        return 0
+    return Worker.torch_platform.device_count()
+
+
+def path_merge_test_env_var() -> str:
+    """Return a path-like env var that is safe to mutate during worker startup."""
+    if Worker.accelerator_type in (AcceleratorType.NPU, AcceleratorType.NPU.value):
+        # torch_npu loads HCCL shared libraries during Worker import. Mutating
+        # LD_LIBRARY_PATH in the actor runtime_env can hide the CANN library path
+        # before the test worker starts, so use another whitelisted path var.
+        return "LIBRARY_PATH"
+    return "LD_LIBRARY_PATH"
+
+
+def test_cluster_config_parses_node_group_hardware():
+    config = DictConfig(
+        {
+            "num_nodes": 4,
+            "component_placement": {"actor": "0-3"},
+            "node_groups": [
+                {
+                    "label": "a800",
+                    "node_ranks": "0-1",
+                    "env_configs": [
+                        {
+                            "node_ranks": "0-1",
+                            "python_interpreter_path": "/opt/a800/bin/python3",
+                            "env_vars": [{"GLOO_SOCKET_IFNAME": "eth0"}],
+                        }
+                    ],
+                },
+                {
+                    "label": "franka",
+                    "node_ranks": "2,3",
+                    "hardware": {
+                        "type": "Franka",
+                        "configs": [
+                            {
+                                "node_rank": 2,
+                                "robot_ip": "10.10.10.1",
+                                "camera_serials": ["CAMERA_SERIAL_1"],
+                                "disable_validate": True,
+                            },
+                            {
+                                "node_rank": 3,
+                                "robot_ip": "10.10.10.2",
+                                "camera_serials": ["CAMERA_SERIAL_2"],
+                                "disable_validate": True,
+                            },
+                        ],
+                    },
+                },
+            ],
+        }
+    )
+
+    cluster_cfg = ClusterConfig.from_dict_cfg(config)
+
+    assert cluster_cfg.num_nodes == 4
+    assert len(cluster_cfg.node_groups) == 2
+
+    a800_group = next(
+        group for group in cluster_cfg.node_groups if group.label == "a800"
+    )
+    assert a800_group.node_ranks == [0, 1]
+    assert a800_group.hardware is None
+    assert a800_group.env_configs is not None
+    assert len(a800_group.env_configs) == 1
+    env_cfg = a800_group.env_configs[0]
+    assert env_cfg.node_ranks == [0, 1]
+    assert env_cfg.python_interpreter_path == "/opt/a800/bin/python3"
+    assert env_cfg.env_vars == [{"GLOO_SOCKET_IFNAME": "eth0"}]
+
+    assert cluster_cfg.get_node_labels_by_rank(0) == ["a800"]
+    assert (
+        cluster_cfg.get_node_python_interpreter_path_by_rank(0)[0]
+        == "/opt/a800/bin/python3"
+    )
+    assert cluster_cfg.get_node_hw_configs_by_rank(0) == []
+
+    franka_group = next(
+        group for group in cluster_cfg.node_groups if group.label == "franka"
+    )
+    assert franka_group.node_ranks == [2, 3]
+    assert franka_group.hardware_type == "Franka"
+
+    node2_hw = cluster_cfg.get_node_hw_configs_by_rank(2)
+    assert len(node2_hw) == 1
+    assert isinstance(node2_hw[0], FrankaConfig)
+    assert node2_hw[0].robot_ip == "10.10.10.1"
+    assert node2_hw[0].camera_serials == ["CAMERA_SERIAL_1"]
+
+    node3_hw = cluster_cfg.get_node_hw_configs_by_rank(3)
+    assert len(node3_hw) == 1
+    assert isinstance(node3_hw[0], FrankaConfig)
+    assert node3_hw[0].robot_ip == "10.10.10.2"
+
+    assert cluster_cfg.get_node_labels_by_rank(2) == ["franka"]
+    assert cluster_cfg.get_node_labels_by_rank(3) == ["franka"]
+    assert cluster_cfg.get_node_labels_by_rank(1) == ["a800"]
+    assert cluster_cfg.get_node_labels_by_rank(99) == []
+
+
+def test_cluster_config_rejects_reserved_node_group_label():
+    config = DictConfig(
+        {
+            "num_nodes": 1,
+            "component_placement": {},
+            "node_groups": [{"label": "node", "node_ranks": "0"}],
+        }
+    )
+
+    with pytest.raises(AssertionError, match="reserved"):
+        ClusterConfig.from_dict_cfg(config)
+
+
+def test_cluster_config_env_vars_must_be_single_kv():
+    config = DictConfig(
+        {
+            "num_nodes": 1,
+            "component_placement": {},
+            "node_groups": [
+                {
+                    "label": "train",
+                    "node_ranks": "0",
+                    "env_configs": [
+                        {
+                            "node_ranks": "0",
+                            "env_vars": [{"A": "1", "B": "2"}],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    with pytest.raises(AssertionError, match="exactly one key-value pair"):
+        ClusterConfig.from_dict_cfg(config)
+
+
+def test_cluster_config_rejects_node_rank_out_of_range():
+    config = DictConfig(
+        {
+            "num_nodes": 2,
+            "component_placement": {},
+            "node_groups": [
+                {
+                    "label": "a",
+                    "node_ranks": "0-3",
+                }
+            ],
+        }
+    )
+
+    with pytest.raises(AssertionError, match="Error parsing node_ranks"):
+        ClusterConfig.from_dict_cfg(config)
+
+
+def test_cluster_config_duplicate_hardware_type_same_node():
+    config = DictConfig(
+        {
+            "num_nodes": 2,
+            "component_placement": {},
+            "node_groups": [
+                {
+                    "label": "franka_a",
+                    "node_ranks": "0",
+                    "hardware": {
+                        "type": "Franka",
+                        "configs": [
+                            {
+                                "node_rank": 0,
+                                "robot_ip": "10.0.0.1",
+                                "disable_validate": True,
+                            }
+                        ],
+                    },
+                },
+                {
+                    "label": "franka_b",
+                    "node_ranks": "0,1",
+                    "hardware": {
+                        "type": "Franka",
+                        "configs": [
+                            {
+                                "node_rank": 0,
+                                "robot_ip": "10.0.0.2",
+                                "disable_validate": True,
+                            }
+                        ],
+                    },
+                },
+            ],
+        }
+    )
+
+    with pytest.raises(AssertionError, match="Cannot have multiple hardware configs"):
+        ClusterConfig.from_dict_cfg(config)
+
+
+def test_cluster_config_duplicate_hardware_entries_disallowed():
+    config = DictConfig(
+        {
+            "num_nodes": 1,
+            "component_placement": {},
+            "node_groups": [
+                {
+                    "label": "robots",
+                    "node_ranks": "0",
+                    "hardware": {
+                        "type": "Franka",
+                        "configs": [
+                            {
+                                "node_rank": 0,
+                                "robot_ip": "10.0.0.1",
+                                "disable_validate": True,
+                            },
+                            {
+                                "node_rank": 0,
+                                "robot_ip": "10.0.0.1",
+                                "disable_validate": True,
+                            },
+                        ],
+                    },
+                }
+            ],
+        }
+    )
+
+    with pytest.raises(AssertionError, match="Duplicate hardware configs"):
+        ClusterConfig.from_dict_cfg(config)
+
+
+def test_cluster_config_node_group_entry_must_be_mapping():
+    config = DictConfig(
+        {
+            "num_nodes": 1,
+            "component_placement": {},
+            "node_groups": ["train"],
+        }
+    )
+
+    with pytest.raises(
+        AssertionError, match="Each node yaml config must be a dictionary"
+    ):
+        ClusterConfig.from_dict_cfg(config)
+
+
+def test_cluster_config_env_var_entry_must_be_mapping():
+    config = DictConfig(
+        {
+            "num_nodes": 1,
+            "component_placement": {},
+            "node_groups": [
+                {
+                    "label": "train",
+                    "node_ranks": "0",
+                    "env_configs": [
+                        {
+                            "node_ranks": "0",
+                            "env_vars": ["BAD"],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    with pytest.raises(AssertionError, match="Each node env_var must be a dict"):
+        ClusterConfig.from_dict_cfg(config)
+
+
+def test_cluster_config_hardware_configs_must_be_mapping():
+    config = DictConfig(
+        {
+            "num_nodes": 1,
+            "component_placement": {},
+            "node_groups": [
+                {
+                    "label": "robot",
+                    "node_ranks": "0",
+                    "hardware": {
+                        "type": "Franka",
+                        "configs": ["BAD"],
+                    },
+                }
+            ],
+        }
+    )
+
+    with pytest.raises(
+        AssertionError, match="Each hardware config must be a dictionary"
+    ):
+        ClusterConfig.from_dict_cfg(config)
+
+
+def test_cluster_config_hardware_node_rank_must_be_in_group():
+    config = DictConfig(
+        {
+            "num_nodes": 2,
+            "component_placement": {},
+            "node_groups": [
+                {
+                    "label": "franka",
+                    "node_ranks": "0",
+                    "hardware": {
+                        "type": "Franka",
+                        "configs": [
+                            {
+                                "node_rank": 1,
+                                "robot_ip": "10.0.0.1",
+                                "disable_validate": True,
+                            }
+                        ],
+                    },
+                }
+            ],
+        }
+    )
+
+    with pytest.raises(AssertionError, match="must be within node_ranks"):
+        ClusterConfig.from_dict_cfg(config)
+
+
+def test_cluster_config_unsupported_hardware_type():
+    config = DictConfig(
+        {
+            "num_nodes": 1,
+            "component_placement": {},
+            "node_groups": [
+                {
+                    "label": "robot",
+                    "node_ranks": "0",
+                    "hardware": {
+                        "type": "UnknownHardware",
+                        "configs": [],
+                    },
+                }
+            ],
+        }
+    )
+
+    with pytest.raises(ValueError, match="Unsupported hardware type"):
+        ClusterConfig.from_dict_cfg(config)
+
+
+def test_cluster_config_invalid_node_rank_format():
+    config = DictConfig(
+        {
+            "num_nodes": 2,
+            "component_placement": {},
+            "node_groups": [
+                {
+                    "label": "train",
+                    "node_ranks": "bad-format",
+                }
+            ],
+        }
+    )
+
+    with pytest.raises(ValueError, match="Invalid rank format"):
+        ClusterConfig.from_dict_cfg(config)
+
+
+def test_cluster_config_missing_required_hardware_field():
+    config = DictConfig(
+        {
+            "num_nodes": 1,
+            "component_placement": {},
+            "node_groups": [
+                {
+                    "label": "robot",
+                    "node_ranks": "0",
+                    "hardware": {
+                        "type": "Franka",
+                        "configs": [
+                            {
+                                # Missing node_rank (the only required field;
+                                # robot_ip is optional and auto-resolved).
+                                "robot_ip": "10.0.0.1",
+                                "disable_validate": True,
+                            }
+                        ],
+                    },
+                }
+            ],
+        }
+    )
+
+    with pytest.raises(
+        AssertionError, match=r"Missing fields '\['node_rank'\]' detected"
+    ):
+        ClusterConfig.from_dict_cfg(config)
+
+
+def test_cluster_config_unknown_hardware_field_rejected():
+    config = DictConfig(
+        {
+            "num_nodes": 1,
+            "component_placement": {},
+            "node_groups": [
+                {
+                    "label": "robot",
+                    "node_ranks": "0",
+                    "hardware": {
+                        "type": "Franka",
+                        "configs": [
+                            {
+                                "node_rank": 0,
+                                "robot_ip": "10.0.0.1",
+                                "disable_validate": True,
+                                "unknown_field": 1,
+                            }
+                        ],
+                    },
+                }
+            ],
+        }
+    )
+
+    with pytest.raises(
+        AssertionError, match="Unknown fields '{'unknown_field'}' detected"
+    ):
+        ClusterConfig.from_dict_cfg(config)
+
+
+def test_cluster_config_num_nodes_must_be_positive():
+    config = DictConfig(
+        {
+            "num_nodes": 0,
+            "component_placement": {},
+        }
+    )
+
+    with pytest.raises(AssertionError, match="'num_nodes' must be a positive integer"):
+        ClusterConfig.from_dict_cfg(config)
+
+
+def test_cluster_config_parses_profiling_settings():
+    config = DictConfig(
+        {
+            "num_nodes": 1,
+            "component_placement": {},
+            "profiling": {
+                "backend": "nsight",
+                "worker_groups": ["actor", "rollout"],
+                "options": {
+                    "t": "cuda,cudnn,cublas,nvtx",
+                    "capture-range": "nvtx",
+                    "stop-on-range-end": True,
+                },
+            },
+        }
+    )
+
+    cluster_cfg = ClusterConfig.from_dict_cfg(config)
+
+    assert cluster_cfg.profiling is not None
+    assert isinstance(cluster_cfg.profiling, NsightConfig)
+    assert cluster_cfg.profiling.enabled is True
+    assert cluster_cfg.profiling.worker_groups == ["actor", "rollout"]
+    assert cluster_cfg.profiling.options == {
+        "t": "cuda,cudnn,cublas,nvtx",
+        "capture-range": "nvtx",
+        "capture-range-end": "stop",
+    }
+
+
+def test_cluster_config_parses_disabled_profiling_settings():
+    config = DictConfig(
+        {
+            "num_nodes": 1,
+            "component_placement": {},
+            "profiling": {
+                "backend": "nsight",
+                "enabled": False,
+                "worker_groups": ["actor"],
+                "options": {"t": "cuda,cudnn,cublas,nvtx"},
+            },
+        }
+    )
+
+    cluster_cfg = ClusterConfig.from_dict_cfg(config)
+
+    assert cluster_cfg.profiling is not None
+    assert isinstance(cluster_cfg.profiling, NsightConfig)
+    assert cluster_cfg.profiling.enabled is False
+    assert cluster_cfg.profiling.worker_groups == ["actor"]
+    assert cluster_cfg.profiling.options == {"t": "cuda,cudnn,cublas,nvtx"}
+
+
+def test_cluster_config_profiling_rejects_duplicate_range_end_options():
+    config = DictConfig(
+        {
+            "num_nodes": 1,
+            "component_placement": {},
+            "profiling": {
+                "backend": "nsight",
+                "options": {
+                    "stop-on-range-end": True,
+                    "capture-range-end": "stop",
+                },
+            },
+        }
+    )
+
+    with pytest.raises(
+        AssertionError,
+        match="must not specify both 'stop-on-range-end' and 'capture-range-end'",
+    ):
+        ClusterConfig.from_dict_cfg(config)
+
+
+def test_cluster_config_profiling_options_must_be_mapping():
+    config = DictConfig(
+        {
+            "num_nodes": 1,
+            "component_placement": {},
+            "profiling": {
+                "backend": "nsight",
+                "options": ["BAD"],
+            },
+        }
+    )
+
+    with pytest.raises(AssertionError, match="Nsight options must be a dictionary"):
+        ClusterConfig.from_dict_cfg(config)
+
+
+def test_cluster_config_parses_profiling_flags():
+    config = DictConfig(
+        {
+            "num_nodes": 1,
+            "component_placement": {},
+            "profiling": {
+                "backend": "nsight",
+                "flags": ["python-backtrace"],
+            },
+        }
+    )
+
+    cluster_cfg = ClusterConfig.from_dict_cfg(config)
+
+    assert cluster_cfg.profiling is not None
+    assert isinstance(cluster_cfg.profiling, NsightConfig)
+    assert cluster_cfg.profiling.flags == ["python-backtrace"]
+
+
+def test_cluster_config_rejects_duplicate_profiling_flag_and_option():
+    config = DictConfig(
+        {
+            "num_nodes": 1,
+            "component_placement": {},
+            "profiling": {
+                "backend": "nsight",
+                "flags": ["python-backtrace"],
+                "options": {"python-backtrace": "cuda"},
+            },
+        }
+    )
+
+    with pytest.raises(
+        AssertionError, match="Nsight flags and options must not specify the same names"
+    ):
+        ClusterConfig.from_dict_cfg(config)
+
+
+def test_cluster_config_profiling_requires_backend():
+    config = DictConfig(
+        {
+            "num_nodes": 1,
+            "component_placement": {},
+            "profiling": {
+                "worker_groups": ["actor"],
+            },
+        }
+    )
+
+    with pytest.raises(ValueError, match="backend must be specified"):
+        ClusterConfig.from_dict_cfg(config)
+
+
+def test_cluster_config_profiling_rejects_unknown_backend():
+    config = DictConfig(
+        {
+            "num_nodes": 1,
+            "component_placement": {},
+            "profiling": {
+                "backend": "unknown_backend",
+            },
+        }
+    )
+
+    with pytest.raises(ValueError, match="Unknown profiling backend"):
+        ClusterConfig.from_dict_cfg(config)
+
+
+def test_nsight_default_preset_enables_cpu_sampling_and_cuda_backtrace():
+    preset_path = (
+        Path(__file__).resolve().parents[2]
+        / "examples"
+        / "sft"
+        / "config"
+        / "profile"
+        / "default.yaml"
+    )
+    preset_cfg = OmegaConf.load(preset_path)
+    nsight_cfg = NsightConfig(**OmegaConf.to_container(preset_cfg, resolve=True))
+
+    assert nsight_cfg.options is not None
+    assert nsight_cfg.options["sample"] == "process-tree"
+    assert nsight_cfg.options["cudabacktrace"] == "all"
+    assert nsight_cfg.flags == []
+
+
+def test_nsight_to_cli_tokens_supports_flags():
+    nsight_cfg = NsightConfig(flags=["python-backtrace"])
+
+    assert nsight_cfg.to_cli_tokens() == ["--python-backtrace"]
+
+
+def test_cluster_config_parses_profiling_steps():
+    config = DictConfig(
+        {
+            "num_nodes": 1,
+            "component_placement": {},
+            "profiling": {
+                "backend": "nsight",
+                "worker_groups": ["actor"],
+                "steps": [5, 10, 20],
+            },
+        }
+    )
+
+    cluster_cfg = ClusterConfig.from_dict_cfg(config)
+
+    assert cluster_cfg.profiling is not None
+    assert isinstance(cluster_cfg.profiling, NsightConfig)
+    assert cluster_cfg.profiling.steps == [5, 10, 20]
+
+
+def test_nsight_steps_auto_sets_capture_range():
+    nsight_cfg = NsightConfig(steps=[5])
+
+    assert nsight_cfg.options is not None
+    assert nsight_cfg.options["capture-range"] == "cudaProfilerApi"
+    assert nsight_cfg.options["capture-range-end"] == "stop"
+
+
+def test_nsight_steps_respects_explicit_capture_range():
+    nsight_cfg = NsightConfig(
+        steps=[5],
+        options={"capture-range": "nvtx", "capture-range-end": "none"},
+    )
+
+    # User's explicit values must win over the auto-set defaults.
+    assert nsight_cfg.options["capture-range"] == "nvtx"
+    assert nsight_cfg.options["capture-range-end"] == "none"
+
+
+def test_nsight_steps_none_does_not_touch_options():
+    nsight_cfg = NsightConfig(steps=None, options={"t": "cuda"})
+
+    # With steps unset, capture-range stays absent.
+    assert "capture-range" not in nsight_cfg.options
+    assert "capture-range-end" not in nsight_cfg.options
+
+
+def test_nsight_rejects_negative_steps():
+    with pytest.raises(AssertionError, match="non-negative"):
+        NsightConfig(steps=[-1])
+
+
+def test_nsight_should_profile_step_matches_configured_steps():
+    nsight_cfg = NsightConfig(steps=[5, 10])
+
+    assert nsight_cfg.should_profile_step(5) is True
+    assert nsight_cfg.should_profile_step(10) is True
+    assert nsight_cfg.should_profile_step(0) is False
+    assert nsight_cfg.should_profile_step(7) is False
+
+
+def test_nsight_should_profile_step_profiles_all_steps_when_steps_none():
+    nsight_cfg = NsightConfig(steps=None)
+
+    assert nsight_cfg.should_profile_step(0) is True
+    assert nsight_cfg.should_profile_step(100) is True
+
+
+def test_nsight_should_profile_step_returns_false_when_disabled():
+    nsight_cfg = NsightConfig(enabled=False, steps=[5])
+
+    assert nsight_cfg.should_profile_step(5) is False
+
+
+def test_modify_profile_context_skips_non_matching_group():
+    py_executable = Cluster.modify_profile_context(
+        python_interpreter_path=sys.executable,
+        worker_name="actor:0",
+        profiling_cfg=NsightConfig(
+            worker_groups=["rollout"],
+            options={"t": "cuda,cudnn,cublas,nvtx"},
+        ),
+    )
+
+    assert py_executable == sys.executable
+
+
+def test_modify_profile_context_skips_disabled_config():
+    py_executable = Cluster.modify_profile_context(
+        python_interpreter_path=sys.executable,
+        worker_name="actor:0",
+        profiling_cfg=NsightConfig(
+            enabled=False,
+            worker_groups=["actor"],
+            options={"t": "cuda,cudnn,cublas,nvtx"},
+        ),
+    )
+
+    assert py_executable == sys.executable
+
+
+def test_rocprof_sys_config_defaults():
+    cfg = RocprofSysConfig()
+    assert cfg.backend == "rocprof_sys"
+    assert cfg.enabled is True
+    assert cfg.args is None
+    assert cfg.env is None
+
+
+def test_rocprof_sys_to_cli_tokens_no_args():
+    cfg = RocprofSysConfig()
+    assert cfg.to_cli_tokens() == ["rocprof-sys-python", "--"]
+
+
+def test_rocprof_sys_to_cli_tokens_single_char_arg():
+    cfg = RocprofSysConfig(args={"F": "true"})
+    tokens = cfg.to_cli_tokens()
+    assert tokens == ["rocprof-sys-python", "-F", "true", "--"]
+
+
+def test_rocprof_sys_to_cli_tokens_multi_char_arg():
+    cfg = RocprofSysConfig(args={"output-format": "json"})
+    tokens = cfg.to_cli_tokens()
+    assert tokens == ["rocprof-sys-python", "--output-format=json", "--"]
+
+
+def test_rocprof_sys_to_cli_tokens_mixed_args():
+    cfg = RocprofSysConfig(args={"F": "true", "output-format": "json"})
+    tokens = cfg.to_cli_tokens()
+    assert tokens[0] == "rocprof-sys-python"
+    assert "-F" in tokens
+    assert "true" in tokens
+    assert "--output-format=json" in tokens
+    assert tokens[-1] == "--"
+
+
+def test_rocprof_sys_rejects_non_dict_args():
+    with pytest.raises(AssertionError, match="args must be a dictionary"):
+        RocprofSysConfig(args=["bad"])
+
+
+def test_rocprof_sys_rejects_non_dict_env():
+    with pytest.raises(AssertionError, match="env must be a dictionary"):
+        RocprofSysConfig(env=["bad"])
+
+
+def test_rocprof_sys_cluster_config_parses():
+    config = DictConfig(
+        {
+            "num_nodes": 1,
+            "component_placement": {},
+            "profiling": {
+                "backend": "rocprof_sys",
+                "worker_groups": ["actor"],
+                "args": {"F": "true"},
+                "env": {"ROCPROFSYS_OUTPUT_PATH": "/tmp/traces"},
+            },
+        }
+    )
+
+    cluster_cfg = ClusterConfig.from_dict_cfg(config)
+
+    assert cluster_cfg.profiling is not None
+    assert isinstance(cluster_cfg.profiling, RocprofSysConfig)
+    assert cluster_cfg.profiling.worker_groups == ["actor"]
+    assert cluster_cfg.profiling.args == {"F": "true"}
+    assert cluster_cfg.profiling.env == {"ROCPROFSYS_OUTPUT_PATH": "/tmp/traces"}
+
+
+def test_rocprof_sys_modify_profiling_context_prepends_command():
+    cfg = RocprofSysConfig(
+        worker_groups=["actor"],
+        args={"F": "true"},
+        output_dir="/tmp/traces",
+    )
+    result = Cluster.modify_profile_context(
+        python_interpreter_path=sys.executable,
+        worker_name="actor:0",
+        profiling_cfg=cfg,
+    )
+    tokens = shlex.split(result)
+    assert tokens[0] == "rocprof-sys-python"
+    assert "-F" in tokens
+    assert "true" in tokens
+    assert "--" in tokens
+    assert tokens[-1] == sys.executable
+
+
+def test_rocprof_sys_get_profiling_env_vars_derives_output_path():
+    cfg = RocprofSysConfig(worker_groups=["actor"], output_dir="/tmp/traces")
+    env_vars = Cluster.get_profiling_env_vars_for_worker(
+        worker_name="actor:0",
+        profiling_cfg=cfg,
+    )
+    assert env_vars.get("ROCPROFSYS_OUTPUT_PATH") == "/tmp/traces"
+    assert "ROCPROFSYS_OUTPUT_PREFIX" in env_vars
+
+
+def test_rocprof_sys_get_profiling_env_vars_user_env_wins():
+    cfg = RocprofSysConfig(
+        worker_groups=["actor"],
+        output_dir="/tmp/traces",
+        env={"ROCPROFSYS_OUTPUT_PATH": "/custom/path"},
+    )
+    env_vars = Cluster.get_profiling_env_vars_for_worker(
+        worker_name="actor:0",
+        profiling_cfg=cfg,
+    )
+    assert env_vars["ROCPROFSYS_OUTPUT_PATH"] == "/custom/path"
+
+
+def test_rocprof_sys_get_profiling_env_vars_skips_non_matching_group():
+    cfg = RocprofSysConfig(worker_groups=["rollout"], output_dir="/tmp/traces")
+    env_vars = Cluster.get_profiling_env_vars_for_worker(
+        worker_name="actor:0",
+        profiling_cfg=cfg,
+    )
+    assert env_vars == {}
+
+
+def test_path_env_merge_mode_default_is_append():
+    assert (
+        Cluster.DEFAULT_SYS_ENV_VAR[ClusterEnvVar.PATH_ENV_MERGE_MODE]
+        == PathEnvMergeMode.APPEND.value
+    )
+
+
+def test_merge_path_like_env_value_append_mode():
+    merged = Cluster._merge_path_like_env_value(
+        env_var_name="PYTHONPATH",
+        existing_value="/existing/a:/existing/b",
+        incoming_value="/new:/existing/a",
+    )
+    assert merged == "/new:/existing/a:/existing/b"
+
+
+def test_merge_path_like_env_value_append_mode_for_path():
+    merged = Cluster._merge_path_like_env_value(
+        env_var_name="PATH",
+        existing_value="/usr/bin:/bin",
+        incoming_value="/custom/bin:/usr/bin",
+    )
+    assert merged == "/custom/bin:/usr/bin:/bin"
+
+
+def test_merge_path_like_env_value_override_mode():
+    # Override mode is handled by direct assignment in _merge_worker_env_vars.
+    base_env = {"PYTHONPATH": "/existing/a:/existing/b"}
+    incoming_env = {"PYTHONPATH": "/new"}
+    merged = Cluster.merge_worker_env_vars(
+        base_env_vars=base_env,
+        incoming_env_vars=incoming_env,
+        mode=PathEnvMergeMode.OVERRIDE,
+    )
+    assert merged["PYTHONPATH"] == "/new"
+
+
+def test_merge_path_like_env_value_ignores_non_whitelisted_env_var():
+    merged = Cluster._merge_path_like_env_value(
+        env_var_name="HTTP_PROXY",
+        existing_value="http://old.proxy:8080",
+        incoming_value="http://new.proxy:8080",
+    )
+    assert merged == "http://new.proxy:8080"
+
+
+class EnvConfigCheckWorker(Worker):
+    def __init__(self):
+        super().__init__()
+
+    def get_env_marker(self, key: str):
+        return os.environ.get(key)
+
+
+def _reset_cluster_singleton():
+    if ray.is_initialized():
+        ray.shutdown()
+    if hasattr(Cluster, "_instance"):
+        instance = getattr(Cluster, "_instance")
+        if instance is not None:
+            instance._has_initialized = False
+        delattr(Cluster, "_instance")
+    Cluster.NAMESPACE = Cluster.SYS_NAME
+
+
+@pytest.mark.ray_integration
+def test_cluster_env_configs_applied_in_worker_launch():
+    env_key = "TRAINING_TEST_ENV_CONFIG_MARKER"
+    env_value = "marker-value"
+    assert env_key not in os.environ
+
+    _reset_cluster_singleton()
+
+    tests_root = Path(__file__).resolve().parent
+    python_path_entries = [str(tests_root)]
+    existing_pythonpath = os.environ.get("PYTHONPATH")
+    if existing_pythonpath:
+        python_path_entries.append(existing_pythonpath)
+    python_path_value = os.pathsep.join(python_path_entries)
+
+    cluster_cfg = OmegaConf.create(
+        {
+            "num_nodes": 1,
+            "component_placement": {},
+            "node_groups": [
+                {
+                    "label": "train",
+                    "node_ranks": "0",
+                    "env_configs": [
+                        {
+                            "node_ranks": "0",
+                            "python_interpreter_path": sys.executable,
+                            "env_vars": [
+                                {env_key: env_value},
+                                {"PYTHONPATH": python_path_value},
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    cluster = Cluster(cluster_cfg=cluster_cfg)
+    placement = NodePlacementStrategy([0], node_group_label="train")
+    worker_group = EnvConfigCheckWorker.create_group().launch(
+        cluster=cluster,
+        placement_strategy=placement,
+        name="env_config_launch",
+    )
+
+    try:
+        env_values = worker_group.get_env_marker(env_key).wait()
+        pythonpath_values = worker_group.get_env_marker("PYTHONPATH").wait()
+    finally:
+        worker_group._close()
+        _reset_cluster_singleton()
+
+    assert env_values == [env_value]
+    assert pythonpath_values[0] is not None
+    assert pythonpath_values[0].split(os.pathsep)[0] == str(tests_root)
+
+
+@pytest.mark.ray_integration
+def test_cluster_env_configs_path_append_mode_in_worker_launch():
+    path_env_key = path_merge_test_env_var()
+    custom_path = "/tmp/training-custom-path-append"
+    old_path = os.environ.get(path_env_key, "")
+    assert custom_path not in old_path.split(os.pathsep)
+
+    _reset_cluster_singleton()
+
+    cluster_cfg = OmegaConf.create(
+        {
+            "num_nodes": 1,
+            "component_placement": {},
+            "node_groups": [
+                {
+                    "label": "train",
+                    "node_ranks": "0",
+                    "env_configs": [
+                        {
+                            "node_ranks": "0",
+                            "python_interpreter_path": sys.executable,
+                            "env_vars": [{path_env_key: custom_path}],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    cluster = Cluster(cluster_cfg=cluster_cfg)
+    placement = NodePlacementStrategy([0], node_group_label="train")
+    worker_group = EnvConfigCheckWorker.create_group().launch(
+        cluster=cluster,
+        placement_strategy=placement,
+        name="path_append_launch",
+    )
+
+    try:
+        worker_path = worker_group.get_env_marker(path_env_key).wait()[0]
+    finally:
+        worker_group._close()
+        _reset_cluster_singleton()
+
+    assert worker_path is not None
+    path_entries = worker_path.split(os.pathsep)
+    assert path_entries[0] == custom_path
+    if old_path:
+        assert any(entry in path_entries for entry in old_path.split(os.pathsep))
+
+
+@pytest.mark.ray_integration
+def test_cluster_env_configs_path_override_mode_in_worker_launch(monkeypatch):
+    path_env_key = path_merge_test_env_var()
+    custom_path = "/tmp/training-custom-path-override"
+    monkeypatch.setenv(
+        Cluster.get_full_env_var_name(ClusterEnvVar.PATH_ENV_MERGE_MODE),
+        PathEnvMergeMode.OVERRIDE.value,
+    )
+
+    _reset_cluster_singleton()
+
+    cluster_cfg = OmegaConf.create(
+        {
+            "num_nodes": 1,
+            "component_placement": {},
+            "node_groups": [
+                {
+                    "label": "train",
+                    "node_ranks": "0",
+                    "env_configs": [
+                        {
+                            "node_ranks": "0",
+                            "python_interpreter_path": sys.executable,
+                            "env_vars": [{path_env_key: custom_path}],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    cluster = Cluster(cluster_cfg=cluster_cfg)
+    placement = NodePlacementStrategy([0], node_group_label="train")
+    worker_group = EnvConfigCheckWorker.create_group().launch(
+        cluster=cluster,
+        placement_strategy=placement,
+        name="path_override_launch",
+    )
+
+    try:
+        worker_path = worker_group.get_env_marker(path_env_key).wait()[0]
+    finally:
+        worker_group._close()
+        _reset_cluster_singleton()
+
+    assert worker_path == custom_path
+
+
+@pytest.mark.ray_integration
+def test_cluster_env_configs_multi_node_group_and_hetero_placement():
+    # Skip if num of accelerators is not 4
+    if accelerator_device_count() != 4:
+        pytest.skip("Skipping test because num of accelerators is not 4")
+    _reset_cluster_singleton()
+
+    config = OmegaConf.create(
+        {
+            "cluster": {
+                "num_nodes": 1,
+                "component_placement": {
+                    # gpu has 4 accelerators; franka adds one more hardware rank after them.
+                    # Use ranks 0 (gpu0) and 4 (franka0).
+                    "hetero": {"node_group": "gpu,franka", "placement": "0,4"}
+                },
+                "node_groups": [
+                    {
+                        "label": "gpu",
+                        "node_ranks": "0",
+                        "env_configs": [
+                            {
+                                "node_ranks": "0",
+                                "python_interpreter_path": sys.executable,
+                                "env_vars": [{"GPU_ENV": "1"}],
+                            }
+                        ],
+                    },
+                    {
+                        "label": "franka",
+                        "node_ranks": "0",
+                        "hardware": {
+                            "type": "Franka",
+                            "configs": [
+                                {
+                                    "node_rank": 0,
+                                    "robot_ip": "127.0.0.1",
+                                    "disable_validate": True,
+                                }
+                            ],
+                        },
+                        "env_configs": [
+                            {
+                                "node_ranks": "0",
+                                "python_interpreter_path": sys.executable,
+                                "env_vars": [{"FRANKA_ENV": "1"}],
+                            }
+                        ],
+                    },
+                ],
+            }
+        }
+    )
+
+    cluster = Cluster(cluster_cfg=config.cluster)
+    try:
+        placement = ComponentPlacement(config, cluster)
+        strategy = placement.get_strategy("hetero")
+        placements = strategy.get_placement(cluster)
+
+        assert len(placements) == 2
+        labels = [p.node_group_label for p in placements]
+        assert set(labels) == {"gpu", "franka"}
+
+        gpu_group = cluster.get_node_group("gpu")
+        franka_group = cluster.get_node_group("franka")
+        assert gpu_group.get_node_env_vars(0) == {"GPU_ENV": "1"}
+        assert franka_group.get_node_env_vars(0) == {"FRANKA_ENV": "1"}
+        assert gpu_group.get_node_python_interpreter_path(0) == sys.executable
+        assert franka_group.get_node_python_interpreter_path(0) == sys.executable
+    finally:
+        if ray.is_initialized():
+            ray.shutdown()
+        _reset_cluster_singleton()

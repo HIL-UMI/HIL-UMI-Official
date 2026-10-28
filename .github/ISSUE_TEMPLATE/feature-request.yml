@@ -1,0 +1,13 @@
+name: Feature request
+description: Suggest an improvement to collection, Advantage or policy training.
+body:
+  - type: textarea
+    id: need
+    attributes:
+      label: Problem and intended outcome
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change and tradeoffs

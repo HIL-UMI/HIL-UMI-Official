@@ -1,0 +1,74 @@
+# Private configuration and credentials
+.env
+.env.*
+!.env.example
+.envrc
+rclone.conf
+credentials.json
+*.pem
+*.key
+id_rsa*
+id_ed25519*
+**/config/*.local.yaml
+**/config/private.yaml
+*.local.json
+*.local.toml
+*.local.yml
+/private/
+/secrets/
+# Local paper supplied for review, not a source-release asset
+/HIL-UMI-ArXiV-preview.pdf
+# Local README previews and original backups
+/readme-preview/
+# Environments, caches and generated files
+.venv*
+.runtime/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+.DS_Store
+.idea/
+.vscode/
+build/
+dist/
+outputs/
+logs/
+*.log
+*.out
+# External assets and local datasets
+/assets/
+/checkpoints/
+/dataset/
+/datasets/
+/data/
+/collection_dataset/
+/advantage/data/
+/advantage/checkpoints/
+/advantage/experiment/
+/advantage/eval_advantage/
+/collection/data_recorder_output/
+/collection/config/backup/
+/collection/config/device_map.csv
+*.whl
+*.apk
+*.so
+*.a
+*.ckpt
+*.pt
+*.pth
+*.safetensors
+*.onnx
+*.h5
+*.hdf5
+*.parquet
+*.npy
+*.npz
+*.mp4
+*.bag
+*.orig
+# Public overview video linked from the README
+!/docs/assets/hil-umi.mp4

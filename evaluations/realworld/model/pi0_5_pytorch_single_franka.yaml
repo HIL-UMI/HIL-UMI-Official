@@ -1,0 +1,32 @@
+model_type: "openpi_pytorch"
+
+# New-format bare Pi0 checkpoint directory containing model.safetensors.
+model_path: ${oc.env:PI05_DEPLOY_CKPT,${oc.env:HIL_UMI_ROOT,.}/checkpoints/pi05/default}
+precision: bf16
+is_lora: False
+lora_rank: 32
+
+# Single-Franka [xyz, rot6d, gripper] action contract.
+num_action_chunks: 20
+action_dim: 10
+use_proprio: True
+num_steps: 5
+add_value_head: False
+
+openpi:
+  task: eval
+  config_name: "pi05_singlefranka_tcp_rot6d"
+  num_images_in_input: 3
+  action_chunk: ${..num_action_chunks}
+  num_steps: ${..num_steps}
+  action_env_dim: ${..action_dim}
+  model_action_dim: 32
+  paligemma_variant: "gemma_2b"
+  action_expert_variant: "gemma_300m"
+  max_token_len: 200
+  discrete_state_input: false
+
+openpi_data:
+  # Directory containing norm_stats.json. This can remain outside the deploy
+  # checkpoint; transforms_pipeline resolves the explicit path first.
+  norm_stats_path: ${oc.env:UMI_LEFT_FRANKA_NORM_STATS,/path/to/your/norm_stats}

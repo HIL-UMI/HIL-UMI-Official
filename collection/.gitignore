@@ -1,0 +1,9 @@
+.venv*/
+.local/
+config/*.local.yaml
+data_recorder_output/
+*.egg-info/
+build/
+dist/
+__pycache__/
+.pytest_cache/

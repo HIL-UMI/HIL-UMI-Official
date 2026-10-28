@@ -1,0 +1,134 @@
+name: Public CPU checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cpu-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cpu-contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      WANDB_MODE: offline
+      JAX_PLATFORMS: cpu
+      CUDA_VISIBLE_DEVICES: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install CPU dependencies without the model or hardware extras
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install torch==2.6.0 torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -e '.[test]' -e './collection[test]' flask 'setuptools>=69,<75.9'
+      - name: Training and runtime tests
+        run: |
+          python -m pytest -q --strict-markers -c tests/unit_tests/pytest.ini \
+            tests/release -m 'not lerobot_integration'
+          python -m pytest -q -ra --strict-markers -c tests/unit_tests/pytest.ini \
+            tests/unit_tests -m 'not ray_integration and not lerobot_integration'
+      - name: Collection contracts with synthetic recorder inputs
+        run: python -m pytest -q -c collection/pyproject.toml collection/tests/unit_tests
+      - name: Advantage data and metadata contracts
+        env:
+          PYTHONPATH: advantage/src:advantage/packages/openpi-client/src:advantage
+        run: |
+          python -m pytest -q \
+            advantage/src/hil_umi_advantage/training/config_names_test.py \
+            advantage/src/hil_umi_advantage/shared/paths_test.py \
+            advantage/scripts/annotate_stage_progress_gt_test.py \
+            advantage/scripts/label_stage_test.py \
+            advantage/scripts/label_advantage_datasets_test.py \
+            advantage/scripts/label_towel_fold_acbc_test.py \
+            advantage/scripts/label_towel_mix_acbc_test.py \
+            advantage/scripts/relabel_acbc_positive_test.py \
+            advantage/scripts/source_runtime_test.py \
+            advantage/scripts/namespace_test.py \
+            advantage/scripts/organize_fold_towel_datasets_test.py \
+            advantage/scripts/annotate_subtask_boundaries_web_test.py
+      - name: Build the training and Advantage distributions
+        run: |
+          python -m build --wheel
+          python -m build --wheel advantage --outdir /tmp/hil-umi-advantage-wheel
+          python -m pip install --no-deps --target /tmp/hil-umi-advantage-install /tmp/hil-umi-advantage-wheel/*.whl
+      - name: Verify the installed Advantage namespace outside the source checkout
+        working-directory: /tmp
+        run: |
+          python -I - <<'PY'
+          import importlib.metadata
+          import importlib.util
+          import sys
+          from pathlib import Path
+          sys.path.insert(0, '/tmp/hil-umi-advantage-install')
+          import hil_umi_advantage
+          from hil_umi_advantage.training.config_names import canonicalize_config_name
+          assert Path(hil_umi_advantage.__file__).is_relative_to('/tmp/hil-umi-advantage-install')
+          assert importlib.metadata.version('hil-umi-advantage') == '0.1.0'
+          assert importlib.util.find_spec('openpi') is None
+          assert canonicalize_config_name('ADVANTAGE_TORCH_TOWEL_FOLD') == 'ADVANTAGE_TORCH_TOWEL_FOLD'
+          patch = Path(hil_umi_advantage.__file__).parent / 'models_pytorch/transformers_replace/models/gemma/modeling_gemma.py'
+          assert patch.is_file()
+          PY
+
+  ray-workers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      WANDB_MODE: offline
+      CUDA_VISIBLE_DEVICES: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install the CPU scheduler test environment
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -e '.[test]' 'pytest>=8.3,<9' 'setuptools>=69,<75.9'
+      - name: Launch real CPU Ray workers
+        run: |
+          python -m pytest -q -ra --strict-markers -c tests/unit_tests/pytest.ini \
+            tests/unit_tests/test_cluster_config.py -m ray_integration
+
+  sft-dataset:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      WANDB_MODE: offline
+      CUDA_VISIBLE_DEVICES: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install the pinned public dataset writer and CPU video dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install torch==2.6.0 torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -e '.[test]' 'pytest>=8.3,<9' 'setuptools>=69,<75.9' jsonlines==4.0.0 draccus==0.10.0 av==15.1.0
+          # Exercise the dataset/video interface without installing robot or model extras.
+          # This is the same immutable LeRobot revision as both project manifests.
+          python -m pip install --no-deps 'lerobot @ git+https://github.com/huggingface/lerobot@0cf864870cf29f4738d3ade893e6fd13fbd7cdb5'
+      - name: Require the real SFT dataset and video dependencies to import
+        run: |
+          python - <<'PY'
+          import av
+          import torchvision
+          from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
+          from training.data.datasets.openpi_pytorch.single_franka.single_franka_sft_dataset import SingleFrankaSftDataset
+          assert av.__version__ == "15.1.0"
+          PY
+      - name: Load complete SFT chunks, prompts, metadata and decoded camera views
+        run: |
+          python -m pytest -q -ra --strict-markers -c tests/unit_tests/pytest.ini \
+            tests/release/test_sft_dataset_integration.py -m lerobot_integration

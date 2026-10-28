@@ -1,0 +1,121 @@
+# Copyright 2025 The RLinf Authors.
+# SPDX-License-Identifier: Apache-2.0
+# Modified for HIL-UMI.
+
+# Override of Ray's IntelGPUAcceleratorManager
+# https://github.com/ray-project/ray/blob/161849364a784442cc659fb9780f1a6adee85fce/python/ray/_private/accelerators/intel_gpu.py
+
+import os
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Optional
+
+from ray._private.accelerators.intel_gpu import IntelGPUAcceleratorManager
+
+from .accelerator import AcceleratorManager, AcceleratorType, ProfileConfig
+
+if TYPE_CHECKING:
+    from ...collective import CollectiveGroupOptions
+
+
+@AcceleratorManager.register_profiling_config(AcceleratorType.INTEL_GPU)
+@dataclass
+class IntelGPUProfileConfig(ProfileConfig):
+    """Intel GPU profiling configuration."""
+
+
+@AcceleratorManager.register_manager(AcceleratorType.INTEL_GPU)
+class IntelGPUManager(AcceleratorManager):
+    """Utility Class for Intel GPU."""
+
+    @staticmethod
+    def get_num_devices():
+        """Get the number of Intel GPU devices on the node."""
+        return IntelGPUAcceleratorManager.get_current_node_num_accelerators()
+
+    @staticmethod
+    def get_accelerator_type():
+        """Get the type of the accelerator."""
+        return AcceleratorType.INTEL_GPU
+
+    @staticmethod
+    def get_accelerator_model():
+        """Get the model of the Intel GPU."""
+        return IntelGPUAcceleratorManager.get_current_node_accelerator_type()
+
+    @staticmethod
+    def get_accelerator_env_var(visible_accelerators: list[str]) -> dict[str, str]:
+        """Get the environment variables related to the accelerator.
+
+        Args:
+            visible_accelerators (List[str]): A list of visible accelerator IDs.
+
+        Returns:
+            Dict[str, str]: A dictionary containing the accelerator environment variables.
+        """
+        env_vars = {}
+        visible_accelerators_str = ",".join(visible_accelerators)
+
+        env_vars["ONEAPI_DEVICE_SELECTOR"] = visible_accelerators_str
+        env_vars["RAY_EXPERIMENTAL_NOSET_ONEAPI_DEVICE_SELECTOR"] = "1"
+        # https://github.com/ray-project/ray/blob/161849364a784442cc659fb9780f1a6adee85fce/python/ray/_private/accelerators/intel_gpu.py#L94
+
+        return env_vars
+
+    @staticmethod
+    def get_visible_devices():
+        """Get the visible device IDs."""
+        visible_devices = os.environ.get("ONEAPI_DEVICE_SELECTOR", None)
+
+        if visible_devices is None or visible_devices == "":
+            return []
+        else:
+            try:
+                visible_devices = [int(v.strip()) for v in visible_devices.split(",")]
+            except ValueError:
+                raise ValueError(
+                    f"Invalid visible device IDs: {visible_devices}. "
+                    "Please ensure they are integers separated by commas."
+                )
+            return visible_devices
+
+    @staticmethod
+    def get_ccl_backend():
+        """Get the CCL backend."""
+        return "ccl"
+
+    @staticmethod
+    def get_ccl_socket_ifname_env_var() -> str:
+        """Get the network socket interface name environment variable.
+
+        Returns:
+            str: The network socket interface name environment variable.
+        """
+        return "CCL_MNIC_NAME"
+
+    @staticmethod
+    def get_torch_platform():
+        """Get the PyTorch platform module."""
+        import torch
+
+        xpu_platform = torch.xpu
+
+        # Some PyTorch/IPEX versions do not expose ipc_collect on torch.xpu.
+        # Keep parity with CUDA call-sites by providing a no-op fallback.
+        if not hasattr(xpu_platform, "ipc_collect"):
+
+            def _ipc_collect_noop() -> None:
+                return None
+
+            setattr(xpu_platform, "ipc_collect", _ipc_collect_noop)
+
+        return xpu_platform
+
+    @staticmethod
+    def get_device_type() -> str:
+        """Get the device type."""
+        return "xpu"
+
+    @staticmethod
+    def get_accel_pg_options(options: Optional["CollectiveGroupOptions"]):
+        """Get the accelerator CCL process group options."""
+        return None

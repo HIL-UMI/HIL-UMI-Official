@@ -1,0 +1,180 @@
+# OOD monitor configuration for collection teleoperation.
+#
+# This file is read by ``ood/monitor.py``.  It is intentionally independent of
+# Hydra so it can be parsed in the field without the full training configuration.
+
+# ---------------------------------------------------------------------------
+# Model settings: these mirror the policy ``rollout.model`` block for pi0.5 evaluation.
+# ---------------------------------------------------------------------------
+model:
+  # Policy model registry key.
+  model_type: "openpi_pytorch"
+
+  # Relative paths are resolved from HIL_UMI_ROOT (the monorepo root).
+  # This directory must contain model.safetensors.
+  model_path: "checkpoints/pi05/default"
+
+  # Precision for the model weights.
+  precision: "bf16"
+
+  # OOD inference must run on the deployment GPU. The monitor fails fast if
+  # CUDA is not visible instead of silently doing multi-minute CPU inference.
+  device: "cuda:0"
+
+  # Shared model-factory fields. This deployment checkpoint is not a LoRA.
+  is_lora: false
+  lora_rank: 32
+  use_proprio: true
+  add_value_head: false
+
+  # Number of denoising steps used by Pi0.sample_actions.
+  num_steps: 10
+
+  # Capture the fixed K=10 / 10-step suffix loop during startup warmup, then
+  # replay it for live inference. Prefix vision/VLM still uses current frames.
+  use_cuda_graph: true
+
+  # Action horizon (chunk length) produced by the model.
+  num_action_chunks: 20
+
+  # Action dimension in the *environment* frame (after output transforms).
+  action_dim: 10
+
+  # openpi config name that selects the TrainConfig / transforms pipeline.
+  openpi:
+    task: "eval"
+    config_name: "pi05_singlefranka_tcp_rot6d"
+    num_images_in_input: 3
+    action_chunk: 20
+    num_steps: 10
+    action_env_dim: 10
+    model_action_dim: 32
+    paligemma_variant: "gemma_2b"
+    action_expert_variant: "gemma_300m"
+    max_token_len: 200
+    discrete_state_input: false
+
+  # Explicit task statistics bundled with the deployment checkpoint.
+  openpi_data:
+    norm_stats_path: "/path/to/your/norm_stats"
+
+# ---------------------------------------------------------------------------
+# OOD detection settings.
+# ---------------------------------------------------------------------------
+ood:
+  # Number of stochastic action samples drawn from the model for each check.
+  k: 10
+
+  # Random seed for the noise generator.
+  seed: 42
+
+  # Compile/warm the fixed K=10 inference shape before continuous live inference.
+  # Uses a separate RNG, so production stochastic samples remain reproducible.
+  warmup_runs: 1
+
+  # Threshold on the single-step (T=1) geometry-aware Energy Distance.
+  threshold_immediate: 1.2
+
+  # Threshold on the aligned 15-step geometry-aware Energy Distance.
+  # These initial values must eventually be calibrated from successful demos.
+  threshold_chunk: 1.2
+
+  # Geometry-aware metric settings for the retained implementation.
+  geometry:
+    # Manual xyz distance denominators, in metres. These values are independent
+    # of checkpoint training statistics. Default: 1 cm on every axis.
+    position_scales_m:
+      s_x: 0.01
+      s_y: 0.01
+      s_z: 0.01
+    # Rotation denominator and semantic weights remain independently tunable.
+    rotation_scale_deg: 10.0
+    component_weights:
+      position: 0.5
+      rotation: 0.25
+      gripper: 0.25
+    time_weighting: "uniform"
+
+  # Detection frequency: run one OOD evaluation every ``interval_s`` seconds.
+  interval_s: 0.5
+
+  # Recorder/action frequency from config/recorder.example.yaml. The monitor checks every
+  # 0.5 s, but compares a full-rate 30 Hz window (15 actions) each time.
+  action_frequency_hz: 30.0
+  comparison_window_s: 0.5
+
+  # Whether to include the front-camera image in metric events. A separate
+  # paired front/wrist live preview is always sent at action_frequency_hz.
+  send_image: true
+
+# ---------------------------------------------------------------------------
+# Data sources.
+# ---------------------------------------------------------------------------
+source:
+  # Unix domain socket path where ``data_recorder`` broadcasts state packets.
+  socket_path: "/tmp/collection_ood_state.sock"
+
+  # The checkpoint was trained from the left-hand UMI projection:
+  # state  = left pose9d + left gripper feedback position
+  # action = left pose9d + left gripper position command
+  arm: "left"
+
+  # Allow the combined launcher to start the monitor just before recorder has
+  # finished creating its camera shared-memory rings.
+  camera_connect_timeout_s: 60.0
+
+  # RGB rings advance in both idle and recording modes. A recorder restart
+  # recreates same-named shared-memory rings, so reattach when
+  # producer frame IDs stop advancing so preview cannot remain on the old run.
+  camera_stale_reconnect_s: 1.0
+
+  # Camera shared-memory ring names created by data_recorder.
+  # RGB ring names follow the convention ``dr_{cam_name}_rgb``.
+  cameras:
+    front:
+      name: "cam_front"
+      ring_name: "dr_cam_front_rgb"
+      width: 640
+      height: 480
+      # Set to match the data_recorder config for this camera.
+      ring_slots: 60
+    wrist_left:
+      name: "cam_left"
+      ring_name: "dr_cam_left_rgb"
+      width: 640
+      height: 480
+      ring_slots: 60
+
+  # Which camera views are fed to the model.
+  model_inputs:
+    main_image: "wrist_left"       # observation/image: left wrist camera
+    extra_view_image: "front"      # observation/extra_view_image: fixed front
+
+  # Large Live preview image. The paired wrist inset uses replay.wrist_camera.
+  preview_image: "front"
+
+  # Match the task_description in the external recorder configuration.
+  task_description: "stack the cubes"
+
+# ---------------------------------------------------------------------------   
+# Persistent, frame-aligned episode replay.
+# ---------------------------------------------------------------------------
+replay:
+  enabled: true
+  # The combined launcher overrides this from the recorder YAML's output_dir.
+  output_root: "./data_recorder_output"
+  fps: 30.0
+  front_camera: "front"
+  wrist_camera: "wrist_left"
+  ffmpeg_bin: "ffmpeg"
+  # Prefer an available hardware encoder, falling back to libx264.
+  encoder_preference: "nvenc_then_x264"
+  encoder_queue_size: 30
+
+# ---------------------------------------------------------------------------
+# Dashboard server.
+# ---------------------------------------------------------------------------
+server:
+  host: "127.0.0.1"
+  port: 8765
+  static_dir: null  # null -> use ood/static next to this file
